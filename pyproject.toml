@@ -1,0 +1,39 @@
+[project]
+name = "eag-v2-s5"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=0.1.0",
+    "python-dotenv>=1.0.0",
+    "google-generativeai>=0.3.0",
+    "Pillow>=10.0.0",
+    "pywinauto>=0.6.8",
+    "pywin32>=306",
+    "python-pptx>=0.6.21",
+    "typer>=0.9.0",
+    "anyio>=3.7.1",
+    "httpx>=0.24.0",
+    "flask[async]>=2.0.1",
+    "flask-cors>=3.0.10",
+    "pydantic>=1.10.0"
+]
+
+[project.optional-dependencies]
+# ...add any optional dependencies here...
+
+[project.urls]
+Homepage = "https://github.com/yourusername/eag-v2-s5"
+Repository = "https://github.com/yourusername/eag-v2-s5"
+
+[tool.uv]
+# ...uv-specific configuration if needed...
+
+[tool.ruff]
+# Example ruff configuration
+line-length = 120
+target-version = "py312"
+# ...add more ruff config as needed...
+
+# ...add other tool configs as needed...
