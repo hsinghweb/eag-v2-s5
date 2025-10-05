@@ -627,6 +627,12 @@ def t_calculate_percentage(percent: float, number: float) -> float:
     logger.info(f"Calling t_calculate_percentage(percent: {percent}, number: {number}) -> float")
     return calculate_percentage(percent, number)
 
+@mcp.tool()
+def fallback_reasoning(description: str) -> str:
+    """Fallback reasoning step when the agent is uncertain or a tool fails."""
+    logger.info(f"Calling fallback_reasoning(description: {description})")
+    return f"Fallback invoked: {description}"
+
 if __name__ == "__main__":
     logger.info("Starting the MCP server")
     if len(sys.argv) > 1 and sys.argv[1] == "dev":

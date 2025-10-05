@@ -8,13 +8,16 @@ A versatile AI assistant that can perform mathematical calculations, create Powe
 - **Mathematical Calculations**: Solve complex equations and word problems
 - **PowerPoint Integration**: Automatically generate and populate slides with results
 - **Email Notifications**: Send results directly to your email
+- **Structured Reasoning**: Step-by-step, tagged, and self-checked reasoning with explicit function calls
+- **Fallback Handling**: Robust fallback reasoning for error recovery
+- **Conversation Memory**: Maintains context and reasoning history for multi-step tasks
 - **Clean Interface**: Modern, responsive design with clear query/result separation
 - **Real-time Processing**: Get instant responses to your queries
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.12+
 - Node.js (for development)
 - Google Chrome browser
 - Google Gemini API key
@@ -24,30 +27,41 @@ A versatile AI assistant that can perform mathematical calculations, create Powe
 1. Clone the repository:
    ```bash
    git clone [your-repository-url]
-   cd eag-v2-s4
+   cd eag-v2-s5
    ```
 
-2. Create and activate a virtual environment:
+2. (Recommended) Use [uv](https://github.com/astral-sh/uv) for fast, reproducible Python environments:
+   ```bash
+   uv venv
+   uv pip install -r requirements.txt
+   ```
+
+   Or, use venv:
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. Install the required Python packages:
-   ```bash
    pip install -r requirements.txt
    ```
 
-4. Create a `.env` file with your API key:
+3. Create a `.env` file with your API key and email settings:
    ```
    GEMINI_API_KEY=your_api_key_here
+   GMAIL_ADDRESS=your_gmail_address@gmail.com
+   GMAIL_APP_PASSWORD=your_gmail_app_password
+   RECIPIENT_EMAIL=recipient@example.com
    ```
 
-5. Start the server:
+4. Start the MCP tool server (in one terminal):
    ```bash
-   python server.py
+   python mcp-server.py dev
    ```
-   The server will start on `http://localhost:5000`
+
+5. Start the AI agent (in another terminal):
+   ```bash
+   python ai_agent.py
+   ```
+
+   The agent will prompt for your query in the terminal.
 
 ### 2. Chrome Extension Setup
 
@@ -73,24 +87,44 @@ A versatile AI assistant that can perform mathematical calculations, create Powe
   - Request to "Email me the result"
   - The agent will send the query and result to your configured email
 
+- **Step-by-step Reasoning**:
+  - The agent reasons step by step, tags each reasoning type, and performs self-checks for correctness.
+  - All function calls are made in strict JSON format for reliability and traceability.
+
+- **Fallback Handling**:
+  - If a tool fails or the agent is uncertain, it will call a fallback reasoning tool and log the step.
+
 ## 🛠 Development
 
 ### Project Structure
-- `ai_agent.py`: Core AI agent logic and tool integration
-- `server.py`: Flask server for handling requests
-- `mcp-server.py`: MCP server for tool execution
+- `ai_agent.py`: Core AI agent logic, conversation memory, and tool integration
+- `mcp-server.py`: MCP server for tool execution, including fallback reasoning
 - `chrome-extension/`: Frontend Chrome extension code
+- `requirements.txt` / `pyproject.toml`: Python dependencies and project metadata
 
 ### Dependencies
 - Backend:
-  - Flask
+  - mcp
   - python-dotenv
   - google-generativeai
-  - mcp (custom tool server)
+  - Pillow
+  - pywinauto
+  - pywin32
+  - python-pptx
+  - typer
+  - anyio
+  - httpx
+  - flask[async]
+  - flask-cors
+  - pydantic
 
 - Frontend:
   - Vanilla JavaScript
   - Modern CSS with Flexbox
+
+- Tooling:
+  - [uv](https://github.com/astral-sh/uv) for fast Python environments
+  - [ruff](https://github.com/astral-sh/ruff) for linting (configured in `pyproject.toml`)
 
 ## 🐛 Troubleshooting
 
@@ -110,8 +144,12 @@ A versatile AI assistant that can perform mathematical calculations, create Powe
    - Check your internet connection
    - Ensure you have sufficient API quota
 
+4. **Email Sending Fails**:
+   - Ensure you have set up an App Password for Gmail
+   - Double-check your `.env` values
+
 ### Viewing Logs
-- Server logs are output to the terminal where `server.py` is running
+- Server logs are output to the `logs/` directory and the terminal
 - Chrome extension logs can be viewed in the browser's developer console
 
 ## 📝 License
