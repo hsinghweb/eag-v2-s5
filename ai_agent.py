@@ -1,11 +1,10 @@
 import os
 from dotenv import load_dotenv
-from mcp import ClientSession, StdioServerParameters, types
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import asyncio
 import google.generativeai as genai
 from concurrent.futures import TimeoutError
-from functools import partial
 import logging
 from datetime import datetime
 import traceback
@@ -42,6 +41,7 @@ model = genai.GenerativeModel('gemini-2.5-flash')
 
 # Constants
 MAX_ITERATIONS = 5
+FUNCTION_CALL_PREFIX = "FUNCTION_CALL:"
 
 # Global variables
 last_response = None
@@ -111,19 +111,17 @@ SELF_CHECK: Is the result reasonable? -> Yes
 FINAL_ANSWER: [Query: Add 2 and 3. Result: 5]
 """
 
-async def generate_with_timeout(model, prompt, timeout=10):
+async def generate_with_timeout(model, prompt):
     """Generate content with a timeout"""
     logger.info("Starting LLM generation...")
     try:
         # Convert the synchronous generate_content call to run in a thread
         loop = asyncio.get_event_loop()
-        response = await asyncio.wait_for(
-            loop.run_in_executor(
+        async with asyncio.timeout(10):
+            response = await loop.run_in_executor(
                 None, 
                 lambda: model.generate_content(prompt)
-            ),
-            timeout=timeout
-        )
+            )
         logger.info("LLM generation completed")
         return response.text
     except TimeoutError:
@@ -142,7 +140,7 @@ def reset_state():
     conversation_history = []
     logger.debug("Reset global state")
 
-async def create_tools_description(tools):
+def create_tools_description(tools):
     """Create a formatted description of available tools."""
     logger.info("Creating tools description...")
     logger.debug(f"Number of tools: {len(tools)}")
@@ -180,11 +178,156 @@ async def create_tools_description(tools):
         logger.error(f"Error creating tools description: {e}")
         return "Error loading tools"
 
+def find_tool_by_name(tools, func_name):
+    """Helper to find a tool by name."""
+    return next((t for t in tools if t.name == func_name), None)
+
+def parse_arguments(args, schema_properties):
+    """Helper to parse arguments according to schema."""
+    arguments = {}
+    if isinstance(args, dict):
+        return args
+    elif isinstance(args, list):
+        for (param_name, param_info), value in zip(schema_properties.items(), args):
+            param_type = param_info.get('type', 'string')
+            if param_type == 'integer':
+                arguments[param_name] = int(value)
+            elif param_type == 'number':
+                arguments[param_name] = float(value)
+            elif param_type == 'array':
+                arguments[param_name] = value
+            else:
+                arguments[param_name] = str(value)
+        return arguments
+    else:
+        return args
+
+async def execute_tool(session, tools, call, iteration_response, conversation_history):
+    func_name = call.get("name")
+    args = call.get("args", [])
+    reasoning_type = call.get("reasoning_type", "")
+    step_desc = call.get("step", "")
+    logger.debug(f"Parsed function call: {call}")
+
+    tool = find_tool_by_name(tools, func_name)
+    if not tool:
+        logger.debug(f"Available tools: {[t.name for t in tools]}")
+        iteration_response.append(f"Unknown tool: {func_name}")
+        conversation_history.append({
+            "type": "function_call",
+            "name": func_name,
+            "args": args,
+            "reasoning_type": reasoning_type,
+            "step": step_desc,
+            "result": "Unknown tool"
+        })
+        return None, iteration_response, conversation_history
+
+    schema_properties = tool.inputSchema.get('properties', {})
+    arguments = parse_arguments(args, schema_properties)
+
+    logger.debug(f"Final arguments: {arguments}")
+    result = await session.call_tool(func_name, arguments=arguments)
+    iteration_result = None
+    if hasattr(result, 'content'):
+        if isinstance(result.content, list):
+            iteration_result = [
+                item.text if hasattr(item, 'text') else str(item)
+                for item in result.content
+            ]
+        else:
+            iteration_result = str(result.content)
+    else:
+        iteration_result = str(result)
+
+    result_str = (
+        f"[{', '.join(iteration_result)}]" if isinstance(iteration_result, list)
+        else str(iteration_result)
+    )
+    iteration_response.append(
+        f"Step: {step_desc} | Reasoning: {reasoning_type} | Called {func_name} with {arguments} -> {result_str}"
+    )
+    conversation_history.append({
+        "type": "function_call",
+        "name": func_name,
+        "args": arguments,
+        "reasoning_type": reasoning_type,
+        "step": step_desc,
+        "result": result_str
+    })
+    return iteration_result, iteration_response, conversation_history
+
+def build_prompt(system_prompt, conversation_history, query, last_response, iteration_response):
+    if last_response is None:
+        current_query = query
+    else:
+        current_query = query + "\n\n" + " ".join(iteration_response) + " What should I do next?"
+    prompt = (
+        f"{system_prompt}\n\n"
+        f"Conversation history:\n{json.dumps(conversation_history, indent=2)}\n\n"
+        f"Query: {current_query}"
+    )
+    return prompt
+
+def handle_final_answer(first_line, query):
+    logger.info("=== Agent Execution Complete ===")
+    final_answer = first_line.split(":", 1)[1].strip()
+    clean_answer = final_answer.strip('[]')
+    if clean_answer.startswith('Query:'):
+        clean_answer = clean_answer.split('Result:')[-1].strip()
+    response_data = {
+        'result': clean_answer,
+        'success': True,
+        'query': query,
+        'answer': clean_answer,
+        'full_response': f"Query: {query}\nResult: {clean_answer}"
+    }
+    return json.dumps(response_data, indent=2)
+
+async def process_llm_response(
+    response_text, tools, session, iteration_response, conversation_history, query
+):
+    global last_response
+    first_line = response_text.splitlines()[0].strip()
+    if first_line.startswith(FUNCTION_CALL_PREFIX):
+        json_str = first_line[len(FUNCTION_CALL_PREFIX):].strip()
+        try:
+            call = json.loads(json_str)
+        except Exception as e:
+            logger.error(f"Failed to parse FUNCTION_CALL JSON: {e}")
+            iteration_response.append(f"Error parsing FUNCTION_CALL JSON: {str(e)}")
+            return None, True  # End iteration
+        iteration_result, iteration_response, conversation_history = await execute_tool(
+            session, tools, call, iteration_response, conversation_history
+        )
+        last_response = iteration_result
+        return None, False
+    elif first_line.startswith("SELF_CHECK:"):
+        conversation_history.append({
+            "type": "self_check",
+            "content": first_line
+        })
+        iteration_response.append(first_line)
+        return None, False
+    elif first_line.startswith("FINAL_ANSWER:"):
+        return handle_final_answer(first_line, query), True
+    elif first_line.startswith(FUNCTION_CALL_PREFIX) and "fallback_reasoning" in first_line:
+        conversation_history.append({
+            "type": "fallback",
+            "content": first_line
+        })
+        iteration_response.append(first_line)
+        iteration_response.append(first_line)
+        return None, False
+    else:
+        logger.warning(f"Unrecognized response: {first_line}")
+        iteration_response.append(f"Unrecognized response: {first_line}")
+        return None, False
+
 async def main(query: str):
     reset_state()  # Reset at the start of main
     logger.info(f"Starting main execution with query: {query}")
     try:
-        # Create a single MCP server connection
         logger.info("Establishing connection to MCP server...")
         server_params = StdioServerParameters(
             command="python",
@@ -196,161 +339,33 @@ async def main(query: str):
             async with ClientSession(read, write) as session:
                 logger.info("Session created, initializing...")
                 await session.initialize()
-                
-                # Get available tools
                 logger.info("Requesting tool list...")
                 tools_result = await session.list_tools()
                 tools = tools_result.tools
                 logger.info(f"Successfully retrieved {len(tools)} tools")
-
-                # Create tools description
-                tools_description = await create_tools_description(tools)
-                
-                # Format system prompt with tools description
+                tools_description = create_tools_description(tools)
                 system_prompt = SYSTEM_PROMPT_TEMPLATE.format(tools_description=tools_description)
                 logger.info("Created system prompt...")
-                
                 logger.info("Starting iteration loop...")
-                
-                # Use global iteration variables
                 global iteration, last_response, conversation_history
                 while iteration < MAX_ITERATIONS:
                     logger.info(f"--- Iteration {iteration + 1} ---")
-                    if last_response is None:
-                        current_query = query
-                    else:
-                        current_query = query + "\n\n" + " ".join(iteration_response) + " What should I do next?"
-
-                    # Compose conversation history for context
-                    prompt = (
-                        f"{system_prompt}\n\n"
-                        f"Conversation history:\n{json.dumps(conversation_history, indent=2)}\n\n"
-                        f"Query: {current_query}"
-                    )
-
+                    prompt = build_prompt(system_prompt, conversation_history, query, last_response, iteration_response)
                     try:
                         response_text = await generate_with_timeout(model, prompt)
                         response_text = response_text.strip()
                         logger.info(f"LLM Response: {response_text}")
-
-                        # Strictly parse only the first line for control
-                        first_line = response_text.splitlines()[0].strip()
-
-                        if first_line.startswith("FUNCTION_CALL:"):
-                            json_str = first_line[len("FUNCTION_CALL:"):].strip()
-                            try:
-                                call = json.loads(json_str)
-                                func_name = call.get("name")
-                                args = call.get("args", [])
-                                reasoning_type = call.get("reasoning_type", "")
-                                step_desc = call.get("step", "")
-                                logger.debug(f"Parsed function call: {call}")
-                            except Exception as e:
-                                logger.error(f"Failed to parse FUNCTION_CALL JSON: {e}")
-                                iteration_response.append(f"Error parsing FUNCTION_CALL JSON: {str(e)}")
-                                break
-
-                            tool = next((t for t in tools if t.name == func_name), None)
-                            if not tool:
-                                logger.debug(f"Available tools: {[t.name for t in tools]}")
-                                iteration_response.append(f"Unknown tool: {func_name}")
-                                conversation_history.append({
-                                    "type": "function_call",
-                                    "name": func_name,
-                                    "args": args,
-                                    "reasoning_type": reasoning_type,
-                                    "step": step_desc,
-                                    "result": "Unknown tool"
-                                })
-                                break
-
-                            arguments = {}
-                            schema_properties = tool.inputSchema.get('properties', {})
-                            if isinstance(args, dict):
-                                arguments = args
-                            elif isinstance(args, list):
-                                for (param_name, param_info), value in zip(schema_properties.items(), args):
-                                    param_type = param_info.get('type', 'string')
-                                    if param_type == 'integer':
-                                        arguments[param_name] = int(value)
-                                    elif param_type == 'number':
-                                        arguments[param_name] = float(value)
-                                    elif param_type == 'array':
-                                        arguments[param_name] = value
-                                    else:
-                                        arguments[param_name] = str(value)
-                            else:
-                                arguments = args
-
-                            logger.debug(f"Final arguments: {arguments}")
-                            result = await session.call_tool(func_name, arguments=arguments)
-                            if hasattr(result, 'content'):
-                                if isinstance(result.content, list):
-                                    iteration_result = [
-                                        item.text if hasattr(item, 'text') else str(item)
-                                        for item in result.content
-                                    ]
-                                else:
-                                    iteration_result = str(result.content)
-                            else:
-                                iteration_result = str(result)
-
-                            result_str = (
-                                f"[{', '.join(iteration_result)}]" if isinstance(iteration_result, list)
-                                else str(iteration_result)
-                            )
-                            iteration_response.append(
-                                f"Step: {step_desc} | Reasoning: {reasoning_type} | Called {func_name} with {arguments} -> {result_str}"
-                            )
-                            conversation_history.append({
-                                "type": "function_call",
-                                "name": func_name,
-                                "args": arguments,
-                                "reasoning_type": reasoning_type,
-                                "step": step_desc,
-                                "result": result_str
-                            })
-                            last_response = iteration_result
-
-                        elif first_line.startswith("SELF_CHECK:"):
-                            conversation_history.append({
-                                "type": "self_check",
-                                "content": first_line
-                            })
-                            iteration_response.append(first_line)
-
-                        elif first_line.startswith("FINAL_ANSWER:"):
-                            logger.info("=== Agent Execution Complete ===")
-                            final_answer = first_line.split(":", 1)[1].strip()
-                            clean_answer = final_answer.strip('[]')
-                            if clean_answer.startswith('Query:'):
-                                clean_answer = clean_answer.split('Result:')[-1].strip()
-                            response_data = {
-                                'result': clean_answer,
-                                'success': True,
-                                'query': query,
-                                'answer': clean_answer,
-                                'full_response': f"Query: {query}\nResult: {clean_answer}"
-                            }
-                            return json.dumps(response_data, indent=2)
-
-                        elif first_line.startswith("FUNCTION_CALL:") and "fallback_reasoning" in first_line:
-                            conversation_history.append({
-                                "type": "fallback",
-                                "content": first_line
-                            })
-                            iteration_response.append(first_line)
-
-                        else:
-                            logger.warning(f"Unrecognized response: {first_line}")
-                            iteration_response.append(f"Unrecognized response: {first_line}")
-
+                        result, should_break = await process_llm_response(
+                            response_text, tools, session, iteration_response, conversation_history, query
+                        )
+                        if result is not None:
+                            return result
+                        if should_break:
+                            break
                     except Exception as e:
                         logger.error(f"Failed to get LLM response: {e}")
                         break
-
                     iteration += 1
-
     except Exception as e:
         logger.error(f"Error in main execution: {e}")
         logger.error(traceback.format_exc())

@@ -1,4 +1,6 @@
 import logging
+import math
+import sqlite3
 
 def log_function(func):
     def wrapper(*args, **kwargs):
@@ -7,9 +9,6 @@ def log_function(func):
         logging.info(f"{func.__name__} returned: {result}")
         return result
     return wrapper
-
-import math
-import sqlite3
 
 DATABASE_PATH = r"D:\Himanshu\EAG-V2\emloyee_salary.db"
 

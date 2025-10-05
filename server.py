@@ -1,9 +1,8 @@
-from flask import Flask, request, jsonify, make_response
+import traceback
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-import asyncio
 import logging
 from ai_agent import main as ai_main
-import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
