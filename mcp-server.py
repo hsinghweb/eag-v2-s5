@@ -2,19 +2,14 @@ import os
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
-from mcp import types
 from PIL import Image as PILImage
 import math
 import sys
-from pywinauto.application import Application
-import win32gui
-import win32con
-import time
-from win32api import GetSystemMetrics
 from pptx import Presentation
 from pptx.util import Inches
 from pptx.dml.color import RGBColor
 from pptx.util import Pt
+import asyncio
 from tools import (
     number_list_to_sum,
     calculate_difference,
@@ -45,6 +40,9 @@ log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"mcp_server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
+# Define constant for PowerPoint filename
+PPTX_FILENAME = 'presentation.pptx'
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -68,10 +66,10 @@ def add(a: int, b: int) -> int:
     return int(a + b)
 
 @mcp.tool()
-def add_list(l: list) -> int:
+def add_list(lst: list) -> int:
     """Add all numbers in a list"""
-    logger.info(f"Calling add_list(l: {l}) -> int")
-    return sum(l)
+    logger.info(f"Calling add_list(lst: {lst}) -> int")
+    return sum(lst)
 
 # Subtraction tool
 @mcp.tool()
@@ -158,10 +156,18 @@ async def close_powerpoint() -> dict:
     """Close PowerPoint"""
     try:
         logger.info("Calling close_powerpoint()")
-        # Close PowerPoint
-        os.system('taskkill /F /IM POWERPNT.EXE')
-        time.sleep(2)
-        
+        # Suppress all output from taskkill
+        try:
+            # Use subprocess with output suppressed
+            proc = await asyncio.create_subprocess_shell(
+                'taskkill /F /IM POWERPNT.EXE',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+        except Exception as e:
+            logger.warning(f"taskkill failed or PowerPoint not running: {e}")
+        await asyncio.sleep(2)
         logger.info("PowerPoint closed successfully")
         return {
             "content": [
@@ -188,26 +194,21 @@ async def open_powerpoint() -> dict:
     """Open a new PowerPoint presentation"""
     try:
         logger.info("Calling open_powerpoint()")
-        # Close any existing PowerPoint instances
         await close_powerpoint()
-        time.sleep(3)  # Increased wait time
-        
-        # Create a new presentation
+        await asyncio.sleep(3)
         prs = Presentation()
-        
-        # Add a title slide
-        title_slide_layout = prs.slide_layouts[0]
-        slide = prs.slides.add_slide(title_slide_layout)
-        
-        # Save the presentation
-        filename = 'presentation.pptx'
+        prs.slide_layouts[0]
+        filename = PPTX_FILENAME
         prs.save(filename)
-        time.sleep(5)  # Increased wait time for file save
-        
-        # Open the presentation
-        os.startfile(filename)
-        time.sleep(10)  # Increased wait time for PowerPoint to open
-        
+        await asyncio.sleep(5)
+        # Open the presentation, suppressing output
+        try:
+            # On Windows, os.startfile does not print to stdout, but just in case:
+            # Use subprocess with output suppressed for other OSes if needed
+            os.startfile(filename)
+        except Exception as e:
+            logger.warning(f"os.startfile failed: {e}")
+        await asyncio.sleep(10)
         logger.info("PowerPoint opened successfully with a new presentation")
         return {
             "content": [
@@ -267,76 +268,71 @@ async def draw_rectangle(x1: int = 1, y1: int = 1, x2: int = 8, y2: int = 6) -> 
             return {"content": [TextContent(type="text", text=error_msg)]}
         
         # Wait before modifying the presentation
-        time.sleep(2)
+        await asyncio.sleep(2)
         
         # Ensure PowerPoint is closed before modifying the file
         await close_powerpoint()
-        time.sleep(2)
+        await asyncio.sleep(2)
+        prs = Presentation(PPTX_FILENAME)
+        slide = prs.slides[0]
         
-        try:
-            # Open the existing presentation
-            prs = Presentation('presentation.pptx')
-            slide = prs.slides[0]
-            
-            # Store existing text boxes
-            text_boxes = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    text = shape.text_frame.text
-                    left = shape.left
-                    top = shape.top
-                    width = shape.width
-                    height = shape.height
-                    text_boxes.append((text, left, top, width, height))
-            
-            # Clear existing shapes except text boxes
-            for shape in slide.shapes:
-                if not shape.has_text_frame:
-                    sp = shape._element
-                    sp.getparent().remove(sp)
-            
-            # Convert coordinates to inches
-            left = Inches(x1)
-            top = Inches(y1)
-            width = Inches(x2 - x1)
-            height = Inches(y2 - y1)
-            
-            logger.debug(f"Rectangle dimensions - left={left}, top={top}, width={width}, height={height}")
-            
-            # Add rectangle
-            shape = slide.shapes.add_shape(
-                1,  # MSO_SHAPE.RECTANGLE
-                left, top, width, height
-            )
-            
-            # Make the rectangle more visible
-            shape.fill.solid()
-            shape.fill.fore_color.rgb = RGBColor(255, 255, 255)  # White fill
-            shape.line.color.rgb = RGBColor(0, 0, 0)  # Black border
-            shape.line.width = Pt(4)  # Thicker border
-            
-            # Save the presentation
-            prs.save('presentation.pptx')
-            time.sleep(2)
-            
-            # Reopen PowerPoint
-            os.startfile('presentation.pptx')
-            time.sleep(5)
-            
-            logger.info(f"Rectangle drawn successfully from ({x1},{y1}) to ({x2},{y2})")
-            return {
-                "content": [
-                    TextContent(
-                        type="text",
-                        text=f"Rectangle drawn successfully from ({x1},{y1}) to ({x2},{y2})"
-                    )
-                ]
-            }
-            
-        except Exception as e:
-            error_msg = f"PowerPoint operation failed: {str(e)}"
-            logger.error(error_msg)
-            return {"content": [TextContent(type="text", text=error_msg)]}
+        # Store existing text boxes
+        slide = prs.slides[0]
+        
+        # Store existing text boxes
+        text_boxes = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                text = shape.text_frame.text
+                left = shape.left
+                top = shape.top
+                width = shape.width
+                height = shape.height
+                text_boxes.append((text, left, top, width, height))
+        
+        # Clear existing shapes except text boxes
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                sp = shape._element
+                sp.getparent().remove(sp)
+        
+        # Convert coordinates to inches
+        left = Inches(x1)
+        top = Inches(y1)
+        width = Inches(x2 - x1)
+        height = Inches(y2 - y1)
+        
+        logger.debug(f"Rectangle dimensions - left={left}, top={top}, width={width}, height={height}")
+        
+        # Add rectangle
+        shape = slide.shapes.add_shape(
+            1,  # MSO_SHAPE.RECTANGLE
+            left, top, width, height
+        )
+        
+        # Make the rectangle more visible
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(255, 255, 255)  # White fill
+        shape.line.color.rgb = RGBColor(0, 0, 0)  # Black border
+        prs.save(PPTX_FILENAME)
+        await asyncio.sleep(2)
+        
+        # Reopen PowerPoint
+        os.startfile(PPTX_FILENAME)
+        await asyncio.sleep(5)
+        # Reopen PowerPoint
+        os.startfile(PPTX_FILENAME)
+        await asyncio.sleep(5)
+        
+        logger.info(f"Rectangle drawn successfully from ({x1},{y1}) to ({x2},{y2})")
+        return {
+            "content": [
+                TextContent(
+                    type="text",
+                    text=f"Rectangle drawn successfully from ({x1},{y1}) to ({x2},{y2})"
+                )
+            ]
+        }
             
     except Exception as e:
         error_msg = f"Error in draw_rectangle: {str(e)}"
@@ -354,14 +350,14 @@ async def add_text_in_powerpoint(text: str) -> dict:
         logger.debug(f"Text contains newlines: {'\\n' in text}")
         
         # Wait before adding text
-        time.sleep(5)
+        await asyncio.sleep(5)
         
         # Ensure PowerPoint is closed before modifying the file
         await close_powerpoint()
-        time.sleep(5)
+        prs = Presentation(PPTX_FILENAME)
+        slide = prs.slides[0]
         
-        # Open the existing presentation
-        prs = Presentation('presentation.pptx')
+        # Add a text box positioned inside the rectangle
         slide = prs.slides[0]
         
         # Add a text box positioned inside the rectangle
@@ -399,15 +395,15 @@ async def add_text_in_powerpoint(text: str) -> dict:
                     run.font.bold = True
                 
                 run.font.color.rgb = RGBColor(0, 0, 0)  # Black text
-                p.space_after = Pt(12)  # Add spacing between lines
-        
-        # Save and wait
-        prs.save('presentation.pptx')
-        time.sleep(5)
+        prs.save(PPTX_FILENAME)
+        await asyncio.sleep(5)
         
         # Reopen PowerPoint
-        os.startfile('presentation.pptx')
-        time.sleep(10)
+        os.startfile(PPTX_FILENAME)
+        await asyncio.sleep(10)
+        # Reopen PowerPoint
+        os.startfile(PPTX_FILENAME)
+        await asyncio.sleep(10)
         
         logger.info(f"Text added successfully: {text}")
         return {
@@ -475,7 +471,7 @@ async def send_gmail(content: str) -> dict:
         # Connect to Gmail's SMTP server
         try:
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                logger.debug(f"Connecting to Gmail SMTP server (smtp.gmail.com:465)")
+                logger.debug("Connecting to Gmail SMTP server (smtp.gmail.com:465)")
                 server.login(gmail_address, gmail_app_password)
                 logger.debug(f"Logged in as {gmail_address}")
                 server.sendmail(gmail_address, recipient_email, msg.as_string())
